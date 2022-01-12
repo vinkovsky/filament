@@ -497,30 +497,67 @@ inline float3 curves(float3 v, float3 shadowGamma, float3 midPoint, float3 highl
 static float3 luminanceScaling(float3 x,
         const ToneMapper& toneMapper, float3 luminanceWeights) noexcept {
 
-    // Troy Sobotka, 2021, "EVILS - Exposure Value Invariant Luminance Scaling"
-    // https://colab.research.google.com/drive/1iPJzNNKR7PynFmsqSnQm3bCZmQ3CvAJ-#scrollTo=psU43hb-BLzB
+//    // Troy Sobotka, 2021, "EVILS - Exposure Value Invariant Luminance Scaling"
+//    // https://colab.research.google.com/drive/1iPJzNNKR7PynFmsqSnQm3bCZmQ3CvAJ-#scrollTo=psU43hb-BLzB
+//
+//    float luminanceIn = dot(x, luminanceWeights);
+//
+//    // TODO: We could optimize for the case of single-channel luminance
+//    float luminanceOut = toneMapper(luminanceIn).y;
+//
+//    float peak = max(x);
+//    float3 chromaRatio = max(x / peak, 0.0f);
+//
+//    float chromaRatioLuminance = dot(chromaRatio, luminanceWeights);
+//
+//    float3 maxReserves = 1.0f - chromaRatio;
+//    float maxReservesLuminance = dot(maxReserves, luminanceWeights);
+//
+//    float luminanceDifference = std::max(luminanceOut - chromaRatioLuminance, 0.0f);
+//    float scaledLuminanceDifference =
+//            luminanceDifference / std::max(maxReservesLuminance, std::numeric_limits<float>::min());
+//
+//    float chromaScale = (luminanceOut - luminanceDifference) /
+//            std::max(chromaRatioLuminance, std::numeric_limits<float>::min());
+//
+//    return chromaScale * chromaRatio + scaledLuminanceDifference * maxReserves;
 
-    float luminanceIn = dot(x, luminanceWeights);
+     float luminanceIn = dot(x, luminanceWeights);
 
-    // TODO: We could optimize for the case of single-channel luminance
-    float luminanceOut = toneMapper(luminanceIn).y;
+     float peak = max(x);
 
-    float peak = max(x);
-    float3 chromaRatio = max(x / peak, 0.0f);
+     float3 chromaRatio = max(x / peak, 0.0f);
+     float chromaRatioLuminance = dot(chromaRatio, luminanceWeights);
 
-    float chromaRatioLuminance = dot(chromaRatio, luminanceWeights);
+     float compressedLuminance = toneMapper(luminanceIn).y;
+     float3 compressed = (chromaRatio / chromaRatioLuminance) * compressedLuminance;
 
-    float3 maxReserves = 1.0f - chromaRatio;
-    float maxReservesLuminance = dot(maxReserves, luminanceWeights);
+     float3 perceptual = sRGB_to_OkLab(compressed);
+     float3 perceptualAchromatic = sRGB_to_OkLab(compressedLuminance);
 
-    float luminanceDifference = std::max(luminanceOut - chromaRatioLuminance, 0.0f);
-    float scaledLuminanceDifference =
-            luminanceDifference / std::max(maxReservesLuminance, std::numeric_limits<float>::min());
+     float chromaScale = saturate((compressedLuminance - 0.75f) / 0.25f);
+     chromaScale = mix(compressedLuminance, chromaScale, saturate(chromaRatioLuminance * 1.1f));
+     chromaScale *= chromaScale;
 
-    float chromaScale = (luminanceOut - luminanceDifference) /
-            std::max(chromaRatioLuminance, std::numeric_limits<float>::min());
+     float3 perceptualTarget = mix(perceptual, perceptualAchromatic, chromaScale);
+     compressed = OkLab_to_sRGB(perceptualTarget);
 
-    return chromaScale * chromaRatio + scaledLuminanceDifference * maxReserves;
+     float s0 = chromaScale;
+     float s1 = 1.0f;
+     if (any(greaterThan(compressed, float3{1.0f}))) {
+        for (int i = 0; i < 24; ++i) {
+            perceptualTarget = mix(perceptual, perceptualAchromatic, mix(s0, s1, 0.5f));
+            compressed = OkLab_to_sRGB(perceptualTarget);
+
+            if (all(lessThanEqual(compressed, float3{1.0f}))) {
+                s1 = mix(s0, s1, 0.5f);
+            } else {
+                s0 = mix(s0, s1, 0.5f);
+            }
+        }
+    }
+
+     return compressed;
 }
 
 //------------------------------------------------------------------------------
@@ -625,6 +662,11 @@ FColorGrading::FColorGrading(FEngine& engine, const Builder& builder) {
         c.colorGradingIn        = selectColorGradingTransformIn(builder->toneMapping);
         c.colorGradingOut       = selectColorGradingTransformOut(builder->toneMapping);
         c.colorGradingLuminance = selectColorGradingLuminance(builder->toneMapping);
+        if (builder->luminanceScaling) {
+            c.colorGradingIn = mat3f{};
+            c.colorGradingOut = mat3f{};
+            c.colorGradingLuminance = LUMINANCE_HK_Rec709;
+        }
     }
 
     mDimension = c.lutDimension;
